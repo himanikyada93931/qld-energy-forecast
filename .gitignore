@@ -13,6 +13,7 @@ data/
 
 logs/
 *.log
+!logs/.gitkeep
 
 .ipynb_checkpoints/
 
@@ -24,4 +25,4 @@ logs/
 build/
 dist/
 
-!logs/.gitkeep
+
