@@ -50,3 +50,30 @@ def fetch_month(year: int, month: int, region: str = "QLD1",
             time.sleep(2 ** attempt)
 
     raise RuntimeError(f"Failed to fetch {url} after 3 attempts")
+
+def fetch_range(start_year: int, start_month: int,
+                end_year: int, end_month: int,
+                region: str = "QLD1") -> list[Path]:
+    """Fetch every month in the range. Continue if individual months fail."""
+    paths = []
+    failures = []
+
+    year, month = start_year, start_month
+    while (year, month) <= (end_year, end_month):
+        try:
+            paths.append(fetch_month(year, month, region))
+        except Exception as exc:
+            failures.append((year, month, exc))
+
+        if month == 12:
+            year += 1
+            month = 1
+        else:
+            month += 1
+
+    if failures:
+        print(f"{len(failures)} month(s) failed:")
+        for y, m, exc in failures:
+            print(f"  {y}-{m:02d}: {exc}")
+
+    return paths
