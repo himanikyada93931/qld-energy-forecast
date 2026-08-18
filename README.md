@@ -7,7 +7,8 @@ and weather data.
 
 ## Status
 
-Week 2 — baseline model deployed. Data pipeline running daily.
+Week 3 — trained model validated (MAPE 2.55% vs baseline 7.36%). Deployment in
+progress; the live endpoint currently serves the baseline.
 
 ## What it does
 
