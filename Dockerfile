@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements-api.txt
 
 COPY src/ ./src/
 COPY data/energy.db ./data/energy.db
+COPY models/ ./models/
 
 RUN pip install --no-cache-dir -e .
 

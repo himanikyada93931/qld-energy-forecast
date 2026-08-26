@@ -1,13 +1,21 @@
 """Train and compare models with a time-based split."""
 
+import pickle
+
 import pandas as pd
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.linear_model import LinearRegression
+
+from src.config import PROJECT_ROOT
+
 
 TARGET = "demand_mw"
 EXCLUDE = ["demand_mw", "price_aud_mwh"]
 
 TEST_FRACTION = 0.25
+
+MODEL_DIR = PROJECT_ROOT / "models"
+MODEL_PATH = MODEL_DIR / "gbm.pkl"
 
 
 def split(df: pd.DataFrame):
@@ -60,3 +68,33 @@ def compare(df: pd.DataFrame) -> pd.DataFrame:
         print(f"{name:20} MAE {results[name]['MAE']:7.1f}   MAPE {results[name]['MAPE']:5.2f}%")
 
     return pd.DataFrame(results).T
+
+
+def train_and_save(df: pd.DataFrame) -> dict:
+    """Train the chosen model on all data and save it with its metadata."""
+    X_train, y_train, X_test, y_test, features = split(df)
+
+    model = GradientBoostingRegressor(
+        n_estimators=400, learning_rate=0.05, max_depth=5, random_state=42
+    )
+    model.fit(X_train, y_train)
+
+    metrics = evaluate(y_test, model.predict(X_test))
+
+    MODEL_DIR.mkdir(exist_ok=True)
+    with open(MODEL_PATH, "wb") as f:
+        pickle.dump({
+            "model": model,
+            "features": features,
+            "metrics": metrics,
+            "trained_at": pd.Timestamp.now(tz="UTC").isoformat(),
+            "train_rows": len(X_train),
+        }, f)
+
+    return metrics
+
+
+def load_model() -> dict:
+    """Load the saved model bundle."""
+    with open(MODEL_PATH, "rb") as f:
+        return pickle.load(f)

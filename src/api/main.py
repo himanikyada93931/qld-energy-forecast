@@ -3,25 +3,27 @@
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 
+from src.features.build import build_features
 from src.ingest.database import read_all, row_count
-from src.models.baseline import predict
+from src.models.train import load_model
 
-app = FastAPI(title="QLD Energy Demand Forecast", version="0.1.0")
+app = FastAPI(title="QLD Energy Demand Forecast", version="0.2.0")
+
+BUNDLE = load_model()
 
 
 @app.get("/")
 def root():
-    """Basic service information."""
     return {
         "service": "QLD electricity demand forecast",
-        "model": "seasonal naive (same hour last week)",
+        "model": "gradient boosting",
         "endpoints": ["/health", "/predict?timestamp=YYYY-MM-DDTHH:MM"],
     }
 
 
 @app.get("/health")
 def health():
-    """Is the service alive, and how fresh is its data?"""
+    """Service status, data freshness, and which model is live."""
     try:
         history = read_all()
         latest = history.index.max()
@@ -32,6 +34,8 @@ def health():
             "rows": row_count(),
             "latest_observation_utc": latest.isoformat(),
             "data_age_hours": round(age_hours, 1),
+            "model_trained_at": BUNDLE["trained_at"],
+            "model_mape": round(BUNDLE["metrics"]["MAPE"], 2),
         }
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Database unavailable: {exc}")
@@ -45,15 +49,20 @@ def predict_demand(timestamp: str):
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid timestamp format")
 
-    history = read_all()
+    features = build_features(read_all())
 
-    try:
-        value = predict(history, target)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+    if target not in features.index:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No features available for {target}. Data covers "
+                   f"{features.index.min()} to {features.index.max()}",
+        )
+
+    row = features.loc[[target], BUNDLE["features"]]
+    value = float(BUNDLE["model"].predict(row)[0])
 
     return {
         "timestamp_utc": target.isoformat(),
         "predicted_demand_mw": round(value, 1),
-        "model": "seasonal_naive_168h",
+        "model": "gradient_boosting",
     }
