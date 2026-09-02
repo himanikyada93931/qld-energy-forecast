@@ -58,3 +58,13 @@ def build_dataset() -> pd.DataFrame:
     df.index.name = "timestamp_utc"
 
     return df
+
+def build_dataset_with_future() -> pd.DataFrame:
+    """Join demand and weather, keeping future rows that have weather but no demand."""
+    demand = load_aemo()
+    weather = load_weather()
+
+    df = demand.join(weather, how="outer")
+    df.index.name = "timestamp_utc"
+
+    return df.loc[:weather.index.max()]
