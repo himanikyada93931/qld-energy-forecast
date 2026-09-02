@@ -6,7 +6,7 @@ from datetime import date, timedelta
 
 from src.config import LOGS
 from src.ingest.aemo import fetch_month
-from src.ingest.weather import fetch_weather
+from src.ingest.weather import fetch_weather, fetch_forecast
 from src.ingest.transform import build_dataset
 from src.ingest.database import upsert, row_count
 
@@ -50,6 +50,13 @@ def main():
     except Exception as exc:
         log.error("Weather failed: %s", exc)
         failures.append("weather")
+
+    try:
+        fetch_forecast()
+        log.info("Weather forecast fetched")
+    except Exception as exc:
+        log.error("Weather forecast failed: %s", exc)
+        failures.append("forecast")
 
     if failures:
         log.error("Aborting, %d source(s) failed: %s", len(failures), ", ".join(failures))
