@@ -7,8 +7,8 @@ from datetime import date, timedelta
 from src.config import LOGS
 from src.ingest.aemo import fetch_month
 from src.ingest.weather import fetch_weather, fetch_forecast
-from src.ingest.transform import build_dataset
-from src.ingest.database import upsert, row_count
+from src.ingest.transform import build_dataset, build_dataset_with_future
+from src.ingest.database import upsert, row_count, upsert_future_weather
 
 logging.basicConfig(
     level=logging.INFO,
@@ -66,6 +66,14 @@ def main():
         df = build_dataset()
         upsert(df)
         after = row_count()
+
+        # Store weather for hours that have no demand yet, so the API can forecast
+        with_future = build_dataset_with_future()
+        future_only = with_future[with_future["demand_mw"].isna()]
+        weather_cols = ["temperature_2m", "apparent_temperature",
+                        "relative_humidity_2m", "cloud_cover", "shortwave_radiation"]
+        n_future = upsert_future_weather(future_only[weather_cols])
+        log.info("Future weather rows stored: %s", n_future)
     except Exception as exc:
         log.exception("Load failed: %s", exc)
         return 1
