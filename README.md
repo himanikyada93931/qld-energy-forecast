@@ -89,6 +89,9 @@ Top feature importances: `demand_lag_24h` (0.76), `demand_lag_168h` (0.06),
 
 ## API
 
+Data freshness depends on when the update last ran. `/health` reports
+`data_age_hours` so a stale pipeline is visible rather than silent.
+
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` | Status, row count, data freshness, and which model is live |
@@ -171,6 +174,12 @@ Deliberate and documented, not oversights.
 - **Python version mismatch.** Development runs 3.14, the container 3.12, because
   3.14 slim images are not yet reliable for all dependencies.
 - **No automated tests yet.**
+- **The daily job depends on the laptop being on.** It is scheduled for 2am via
+  Windows Task Scheduler with "run as soon as possible after a missed start"
+  enabled, so a skipped run catches up at the next login rather than being lost.
+  But if the machine is off for several days, the data has a gap for those days
+  and no predictions are logged. Moving the schedule to a cloud runner would fix
+  this and the stale-deployment problem together.
 
 ## Data sources
 
