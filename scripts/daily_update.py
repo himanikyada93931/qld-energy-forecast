@@ -3,12 +3,16 @@
 import logging
 import sys
 from datetime import date, timedelta
+import pandas as pd
+
+from src.models.train import load_model
+from src.models.horizon import recursive_forecast
 
 from src.config import LOGS
 from src.ingest.aemo import fetch_month
 from src.ingest.weather import fetch_weather, fetch_forecast
 from src.ingest.transform import build_dataset, build_dataset_with_future
-from src.ingest.database import upsert, row_count, upsert_future_weather
+from src.ingest.database import (upsert, row_count, upsert_future_weather,log_predictions, read_with_future)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -80,6 +84,15 @@ def main():
 
     log.info("Rows after: %s (+%s new)", after, after - before)
     log.info("Latest timestamp: %s", df.index.max())
+    try:
+        bundle = load_model()
+        data = read_with_future()
+        origin = data["demand_mw"].last_valid_index()
+        series = recursive_forecast(data, 72, bundle["model"], bundle["features"])
+        n = log_predictions(series, origin, bundle["trained_at"])
+        log.info("Predictions logged: %s", n)
+    except Exception as exc:
+        log.error("Prediction logging failed: %s", exc)
     log.info("Finished")
     return 0
 

@@ -32,12 +32,25 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
 )
 """
 
+PREDICTIONS_TABLE = "predictions"
+
+PREDICTIONS_SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS {PREDICTIONS_TABLE} (
+    target_utc     TEXT NOT NULL,
+    made_at_utc    TEXT NOT NULL,
+    hours_ahead    INTEGER,
+    predicted_mw   REAL,
+    model_version  TEXT,
+    PRIMARY KEY (target_utc, made_at_utc)
+)
+"""
 
 def connect() -> sqlite3.Connection:
     """Open a connection to the project database, creating the table if needed."""
     conn = sqlite3.connect(DB_PATH)
     conn.execute(SCHEMA)
     conn.execute(WEATHER_SCHEMA)
+    conn.execute(PREDICTIONS_SCHEMA)
     conn.commit()
     return conn
 
@@ -105,3 +118,45 @@ def row_count() -> int:
     """How many rows are currently stored."""
     with connect() as conn:
         return conn.execute(f"SELECT COUNT(*) FROM {TABLE}").fetchone()[0]
+
+def log_predictions(series: pd.Series, made_at: pd.Timestamp, model_version: str) -> int:
+    """Record what was predicted, when, and by which model."""
+    rows = [
+        (
+            ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            made_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            int((ts - made_at).total_seconds() // 3600),
+            float(value),
+            model_version,
+        )
+        for ts, value in series.items()
+    ]
+
+    sql = (f"INSERT OR REPLACE INTO {PREDICTIONS_TABLE} "
+           "(target_utc, made_at_utc, hours_ahead, predicted_mw, model_version) "
+           "VALUES (?,?,?,?,?)")
+
+    with connect() as conn:
+        conn.executemany(sql, rows)
+        conn.commit()
+
+    return len(rows)
+
+
+def read_predictions_vs_actual() -> pd.DataFrame:
+    """Join logged predictions against what actually happened."""
+    with connect() as conn:
+        df = pd.read_sql(
+            f"""SELECT p.target_utc, p.made_at_utc, p.hours_ahead,
+                       p.predicted_mw, p.model_version, o.demand_mw AS actual_mw
+                FROM {PREDICTIONS_TABLE} p
+                LEFT JOIN {TABLE} o ON o.timestamp_utc = p.target_utc
+                ORDER BY p.target_utc""",
+            conn,
+        )
+
+    for col in ("target_utc", "made_at_utc"):
+        df[col] = pd.to_datetime(df[col], format="ISO8601", utc=True)
+
+    df["error_mw"] = df["predicted_mw"] - df["actual_mw"]
+    return df
