@@ -2,6 +2,10 @@
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException
+import threading
+import time
+from contextlib import asynccontextmanager
+import os
 
 from src.features.build import build_features
 from src.ingest.database import read_all, row_count, read_with_future
@@ -11,8 +15,27 @@ from src.models.horizon import recursive_forecast
 
 
 
-app = FastAPI(title="QLD Energy Demand Forecast", version="0.2.0")
+REFRESH_HOURS = float(os.getenv("REFRESH_HOURS", "6"))
 
+def refresh_loop():
+    """Update data and log predictions every few hours, in the background."""
+    from scripts.daily_update import main as update
+
+    while True:
+        time.sleep(REFRESH_HOURS * 3600)
+        try:
+            update()
+        except Exception as exc:
+            print(f"Background refresh failed: {exc}")
+
+
+@asynccontextmanager
+async def lifespan(app):
+    threading.Thread(target=refresh_loop, daemon=True).start()
+    yield
+
+
+app = FastAPI(title="QLD Energy Demand Forecast", version="0.3.0", lifespan=lifespan)
 BUNDLE = load_model()
 
 
