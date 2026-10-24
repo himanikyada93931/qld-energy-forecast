@@ -12,6 +12,7 @@ from src.ingest.database import read_predictions_vs_actual
 from src.models.train import load_model
 
 CHART_DAYS = 7
+TZ = "Australia/Brisbane"
 
 # Naive baseline, scored on the same held-out window as the model.
 BASELINE_MAPE = 5.71
@@ -19,6 +20,17 @@ BASELINE_MAE = 303
 
 
 # ---------------------------------------------------------------- data
+
+def _time_ticks(local, every: int):
+    """Indices to label on a time axis, every N hours. Day name at midnight."""
+    ticks = []
+    for i, t in enumerate(local):
+        if t.hour % every == 0 and t.minute == 0:
+            ticks.append({"i": i,
+                          "time": t.strftime("%H:%M"),
+                          "day": t.strftime("%a %d %b") if t.hour == 0 else ""})
+    return ticks
+
 
 def build_dashboard_data() -> dict:
     """Everything the page needs, computed with pandas."""
@@ -30,7 +42,7 @@ def build_dashboard_data() -> dict:
 
     scored["abs_err"] = scored["error_mw"].abs()
     scored["abs_pct"] = (scored["abs_err"] / scored["actual_mw"]) * 100
-    scored["brisbane"] = scored["target_utc"].dt.tz_convert("Australia/Brisbane")
+    scored["brisbane"] = scored["target_utc"].dt.tz_convert(TZ)
 
     overall = {
         "n": int(len(scored)),
@@ -51,33 +63,84 @@ def build_dashboard_data() -> dict:
     hourly = scored.groupby(scored["brisbane"].dt.hour)["abs_err"].mean()
     by_hour = [{"hour": int(h), "mae": float(v)} for h, v in hourly.items()]
 
+    # Same cut, split by how far ahead the forecast was made. Both in MW, so
+    # they share one axis - bars for the near horizon, a line for the far one.
+    far_day = int(scored["day"].max())
+    near = scored[scored["day"] == 1].groupby(scored["brisbane"].dt.hour)["abs_err"].mean()
+    far = scored[scored["day"] == far_day].groupby(scored["brisbane"].dt.hour)["abs_err"].mean()
+    combo = {
+        "far_day": far_day,
+        "rows": [{"hour": int(h),
+                  "near": float(near.get(h, float("nan"))),
+                  "far": float(far.get(h, float("nan")))}
+                 for h in range(24) if h in near.index or h in far.index],
+    }
+
     latest = (scored.sort_values("made_at_utc")
                     .groupby("target_utc", as_index=False)
                     .last())
     cutoff = latest["target_utc"].max() - pd.Timedelta(days=CHART_DAYS)
     window = latest[latest["target_utc"] >= cutoff].sort_values("target_utc")
-    local = window["target_utc"].dt.tz_convert("Australia/Brisbane")
+    local = list(window["target_utc"].dt.tz_convert(TZ))
 
     series = {
         "labels": [t.strftime("%a %d %b, %H:%M") for t in local],
-        "short": [t.strftime("%a %d") for t in local],
+        "ticks": _time_ticks(local, 12),
         "actual": [float(v) for v in window["actual_mw"]],
         "predicted": [float(v) for v in window["predicted_mw"]],
     }
+
+    # ---- what the service currently expects to happen -------------------
+    outlook = tomorrow = None
+    future = df[df["actual_mw"].isna()].copy()
+    if not future.empty:
+        future = (future.sort_values("made_at_utc")
+                        .groupby("target_utc", as_index=False)
+                        .last()
+                        .sort_values("target_utc"))
+        flocal = list(future["target_utc"].dt.tz_convert(TZ))
+        values = [float(v) for v in future["predicted_mw"]]
+
+        tomorrow_date = (pd.Timestamp.now(tz=TZ) + pd.Timedelta(days=1)).date()
+        band = [i for i, t in enumerate(flocal) if t.date() == tomorrow_date]
+
+        outlook = {
+            "labels": [t.strftime("%a %d %b, %H:%M") for t in flocal],
+            "ticks": _time_ticks(flocal, 6),
+            "values": values,
+            "band": (band[0], band[-1]) if band else None,
+            "days": len({t.date() for t in flocal}),
+            "made_at": (future["made_at_utc"].max().tz_convert(TZ)
+                        .strftime("%d %b, %H:%M")),
+            "from": flocal[0].strftime("%a %d %b, %H:%M"),
+            "to": flocal[-1].strftime("%a %d %b, %H:%M"),
+        }
+
+        if band:
+            rows = [{"hour": flocal[i].hour, "mw": values[i]} for i in band]
+            peak = max(rows, key=lambda r: r["mw"])
+            trough = min(rows, key=lambda r: r["mw"])
+            tomorrow = {
+                "date": pd.Timestamp(tomorrow_date).strftime("%A %d %B"),
+                "rows": rows,
+                "peak": peak, "trough": trough,
+                "mean": sum(r["mw"] for r in rows) / len(rows),
+                "complete": len(rows) == 24,
+            }
 
     try:
         bundle = load_model()
         model = {
             "trained_at": pd.Timestamp(bundle["trained_at"])
-                            .tz_convert("Australia/Brisbane")
-                            .strftime("%d %b %Y"),
+                            .tz_convert(TZ).strftime("%d %b %Y"),
             "holdout_mape": bundle["metrics"]["MAPE"],
         }
     except Exception:
         model = None
 
     return {"empty": False, "overall": overall, "by_horizon": by_horizon,
-            "by_hour": by_hour, "series": series, "model": model}
+            "by_hour": by_hour, "combo": combo, "series": series,
+            "outlook": outlook, "tomorrow": tomorrow, "model": model}
 
 
 # ---------------------------------------------------------------- charts
@@ -96,14 +159,40 @@ def _nice_bounds(lo: float, hi: float, target_ticks: int = 5):
     return math.floor(lo / step) * step, math.ceil(hi / step) * step, step
 
 
-def line_chart(series: dict, W: int = 1180, H: int = 290) -> str:
+def _y_grid(parts, y, lo, hi, step, left, right, W):
+    """Horizontal grid lines with value labels down the left."""
+    v = lo
+    while v <= hi + step / 2:
+        gy = y(v)
+        parts.append(f'<line x1="{left}" y1="{gy:.1f}" x2="{W - right}" '
+                     f'y2="{gy:.1f}" class="grid"/>')
+        parts.append(f'<text x="{left - 10}" y="{gy:.1f}" text-anchor="end" '
+                     f'dominant-baseline="middle" class="tick">{v:,.0f}</text>')
+        v += step
+
+
+def _time_axis(parts, ticks, x, n, H, W, left, right):
+    """Two-row time axis: clock time, with the date under each midnight."""
+    for t in ticks:
+        px = x(t["i"])
+        anchor = "start" if px < left + 18 else "end" if px > W - right - 18 else "middle"
+        parts.append(f'<line x1="{px:.1f}" y1="{H - 40}" x2="{px:.1f}" '
+                     f'y2="{H - 36}" class="grid"/>')
+        parts.append(f'<text x="{px:.1f}" y="{H - 25}" text-anchor="{anchor}" '
+                     f'class="tick">{t["time"]}</text>')
+        if t["day"]:
+            parts.append(f'<text x="{px:.1f}" y="{H - 8}" text-anchor="{anchor}" '
+                         f'class="tick day">{t["day"]}</text>')
+
+
+def line_chart(series: dict, W: int = 1180, H: int = 320) -> str:
     """Predicted and actual demand over time."""
     actual, predicted = series["actual"], series["predicted"]
     n = len(actual)
     if n < 2:
         return '<p class="muted">Not enough scored predictions yet to plot.</p>'
 
-    left, right, top, bottom = 56, 14, 14, 28
+    left, right, top, bottom = 56, 14, 14, 48
     both = actual + predicted
     lo, hi, step = _nice_bounds(min(both), max(both))
 
@@ -114,19 +203,8 @@ def line_chart(series: dict, W: int = 1180, H: int = 290) -> str:
         return top + (1 - (v - lo) / (hi - lo)) * (H - top - bottom)
 
     parts = []
-    v = lo
-    while v <= hi + step / 2:
-        gy = y(v)
-        parts.append(f'<line x1="{left}" y1="{gy:.1f}" x2="{W - right}" y2="{gy:.1f}" class="grid"/>')
-        parts.append(f'<text x="{left - 10}" y="{gy:.1f}" text-anchor="end" '
-                     f'dominant-baseline="middle" class="tick">{v:,.0f}</text>')
-        v += step
-
-    for k in range(6):
-        i = round((n - 1) * k / 5)
-        anchor = "start" if k == 0 else "end" if k == 5 else "middle"
-        parts.append(f'<text x="{x(i):.1f}" y="{H - 8}" text-anchor="{anchor}" '
-                     f'class="tick">{series["short"][i]}</text>')
+    _y_grid(parts, y, lo, hi, step, left, right, W)
+    _time_axis(parts, series["ticks"], x, n, H, W, left, right)
 
     for values, colour in ((actual, "--actual"), (predicted, "--predicted")):
         pts = " ".join(f"{x(i):.1f},{y(val):.1f}" for i, val in enumerate(values))
@@ -137,55 +215,152 @@ def line_chart(series: dict, W: int = 1180, H: int = 290) -> str:
             f'demand over the last {CHART_DAYS} days">' + "".join(parts) + "</svg>")
 
 
-def bar_chart(by_hour: list, W: int = 720, H: int = 250) -> str:
-    """Mean absolute error by hour of day."""
-    if not by_hour:
-        return ""
+def forecast_chart(outlook: dict, W: int = 1180, H: int = 300) -> str:
+    """Predicted demand ahead of time, with tomorrow shaded."""
+    values = outlook["values"]
+    n = len(values)
+    if n < 2:
+        return '<p class="muted">No forward forecast stored yet.</p>'
 
-    values = [h["mae"] for h in by_hour]
-    left, right, top, bottom = 50, 12, 26, 26
-    _, hi, step = _nice_bounds(0, max(values))
+    left, right, top, bottom = 56, 14, 22, 48
+    lo, hi, step = _nice_bounds(min(values), max(values))
 
-    band = (W - left - right) / len(by_hour)
-    width = min(22, band - 3)
-    worst = max(range(len(values)), key=lambda i: values[i])
+    def x(i):
+        return left + (i / (n - 1)) * (W - left - right)
 
     def y(v):
-        return top + (1 - v / hi) * (H - top - bottom)
+        return top + (1 - (v - lo) / (hi - lo)) * (H - top - bottom)
 
     parts = []
-    v = 0.0
-    while v <= hi + step / 2:
-        gy = y(v)
-        parts.append(f'<line x1="{left}" y1="{gy:.1f}" x2="{W - right}" y2="{gy:.1f}" class="grid"/>')
-        parts.append(f'<text x="{left - 10}" y="{gy:.1f}" text-anchor="end" '
-                     f'dominant-baseline="middle" class="tick">{v:,.0f}</text>')
-        v += step
 
-    baseline = y(0)
-    for i, row in enumerate(by_hour):
+    band = outlook["band"]
+    if band:
+        x0, x1 = x(band[0]), x(band[1])
+        parts.append(f'<rect x="{x0:.1f}" y="{top}" width="{x1 - x0:.1f}" '
+                     f'height="{H - top - bottom:.1f}" fill="var(--actual)" '
+                     f'opacity="0.075"/>')
+
+    _y_grid(parts, y, lo, hi, step, left, right, W)
+    _time_axis(parts, outlook["ticks"], x, n, H, W, left, right)
+
+    if band:
+        parts.append(f'<text x="{(x(band[0]) + x(band[1])) / 2:.1f}" y="{top - 6}" '
+                     f'text-anchor="middle" class="peak">Tomorrow</text>')
+
+    pts = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(values))
+    parts.append(f'<polyline points="{pts}" fill="none" stroke="var(--predicted)" '
+                 f'stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>')
+
+    return (f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="Forecast demand for the '
+            f'next {outlook["days"]} days">' + "".join(parts) + "</svg>")
+
+
+def _bars(parts, rows, key, y, baseline, left, band, width, colour, fmt):
+    """Rounded data-end, square baseline, native tooltip per bar."""
+    for i, row in enumerate(rows):
+        v = row[key]
+        if v != v:                                    # NaN
+            continue
         cx = left + band * i + band / 2
-        bx, by = cx - width / 2, y(row["mae"])
+        bx, by = cx - width / 2, y(v)
         height = baseline - by
-        r = min(4, height / 2, width / 2)      # rounded data-end, square baseline
+        r = min(4, max(height, 0.1) / 2, width / 2)
         d = (f"M{bx:.1f},{baseline:.1f} L{bx:.1f},{by + r:.1f} "
              f"Q{bx:.1f},{by:.1f} {bx + r:.1f},{by:.1f} "
              f"L{bx + width - r:.1f},{by:.1f} "
              f"Q{bx + width:.1f},{by:.1f} {bx + width:.1f},{by + r:.1f} "
              f"L{bx + width:.1f},{baseline:.1f} Z")
-        parts.append(f'<path d="{d}" fill="var(--actual)">'
-                     f'<title>{row["hour"]:02d}:00 — {row["mae"]:,.0f} MW</title></path>')
-        if i % 4 == 0:
-            parts.append(f'<text x="{cx:.1f}" y="{H - 7}" text-anchor="middle" '
-                         f'class="tick">{row["hour"]:02d}</text>')
+        parts.append(f'<path d="{d}" fill="var({colour})">'
+                     f'<title>{row["hour"]:02d}:00 — {fmt(v)}</title></path>')
 
-    wx = left + band * worst + band / 2
-    parts.append(f'<text x="{wx:.1f}" y="{y(values[worst]) - 9:.1f}" text-anchor="middle" '
-                 f'class="peak">{values[worst]:,.0f} MW</text>')
+
+def combo_chart(combo: dict, W: int = 720, H: int = 270) -> str:
+    """Error by hour: bars for day-ahead, a line for the longest horizon.
+
+    Both series are mean absolute error in MW, so they share one axis. A
+    second y-scale would let any gap be drawn as any size.
+    """
+    rows = combo["rows"]
+    if not rows:
+        return ""
+
+    values = [v for r in rows for v in (r["near"], r["far"]) if v == v]
+    left, right, top, bottom = 50, 12, 14, 26
+    _, hi, step = _nice_bounds(0, max(values))
+
+    band = (W - left - right) / len(rows)
+    width = min(20, band - 4)
+
+    def x(i):
+        return left + band * i + band / 2
+
+    def y(v):
+        return top + (1 - v / hi) * (H - top - bottom)
+
+    parts = []
+    _y_grid(parts, y, 0, hi, step, left, right, W)
+    _bars(parts, rows, "near", y, y(0), left, band, width, "--actual",
+          lambda v: f"{v:,.0f} MW, 1 day ahead")
+
+    pts = [(x(i), y(r["far"])) for i, r in enumerate(rows) if r["far"] == r["far"]]
+    if len(pts) > 1:
+        parts.append('<polyline points="'
+                     + " ".join(f"{px:.1f},{py:.1f}" for px, py in pts)
+                     + '" fill="none" stroke="var(--predicted)" stroke-width="2" '
+                       'stroke-linejoin="round" stroke-linecap="round"/>')
+        for i, r in enumerate(rows):
+            if r["far"] == r["far"]:
+                parts.append(f'<circle cx="{x(i):.1f}" cy="{y(r["far"]):.1f}" r="4" '
+                             f'fill="var(--predicted)" stroke="var(--card)" '
+                             f'stroke-width="2"><title>{r["hour"]:02d}:00 — '
+                             f'{r["far"]:,.0f} MW, {combo["far_day"]} days ahead</title></circle>')
+
+    for i, r in enumerate(rows):
+        if r["hour"] % 4 == 0:
+            parts.append(f'<text x="{x(i):.1f}" y="{H - 7}" text-anchor="middle" '
+                         f'class="tick">{r["hour"]:02d}</text>')
 
     return (f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="Mean absolute error by '
-            f'hour of day, worst at {by_hour[worst]["hour"]:02d}:00">'
+            f'hour of day, one day ahead against {combo["far_day"]} days ahead">'
             + "".join(parts) + "</svg>")
+
+
+def tomorrow_chart(tomorrow: dict, W: int = 720, H: int = 250) -> str:
+    """Tomorrow's forecast, hour by hour, peak and trough labelled."""
+    rows = tomorrow["rows"]
+    if not rows:
+        return ""
+
+    values = [r["mw"] for r in rows]
+    left, right, top, bottom = 52, 12, 26, 26
+    lo, hi, step = _nice_bounds(min(values) * 0.97, max(values))
+
+    band = (W - left - right) / len(rows)
+    width = min(22, band - 3)
+
+    def x(i):
+        return left + band * i + band / 2
+
+    def y(v):
+        return top + (1 - (v - lo) / (hi - lo)) * (H - top - bottom)
+
+    parts = []
+    _y_grid(parts, y, lo, hi, step, left, right, W)
+    _bars(parts, rows, "mw", y, y(lo), left, band, width, "--predicted",
+          lambda v: f"{v:,.0f} MW forecast")
+
+    for row, cls in ((tomorrow["peak"], "peak"), (tomorrow["trough"], "peak")):
+        i = rows.index(row)
+        parts.append(f'<text x="{x(i):.1f}" y="{y(row["mw"]) - 9:.1f}" '
+                     f'text-anchor="middle" class="{cls}">{row["mw"]:,.0f}</text>')
+
+    for i, r in enumerate(rows):
+        if r["hour"] % 4 == 0:
+            parts.append(f'<text x="{x(i):.1f}" y="{H - 7}" text-anchor="middle" '
+                         f'class="tick">{r["hour"]:02d}</text>')
+
+    return (f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="Forecast demand for '
+            f'{tomorrow["date"]}, hour by hour">' + "".join(parts) + "</svg>")
 
 
 # ---------------------------------------------------------------- page
@@ -227,6 +402,14 @@ h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.016em; margin: 0; }
 .tile .c { font-size: 12px; color: var(--ink-3); margin-top: 2px; font-variant-numeric: tabular-nums; }
 
 .row { display: grid; grid-template-columns: 1.6fr 1fr; gap: 13px; }
+.row.even { grid-template-columns: 1.6fr 1fr; }
+.facts { display: grid; gap: 9px; }
+.fact { display: flex; justify-content: space-between; align-items: baseline;
+        gap: 12px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+.fact:last-child { border-bottom: none; }
+.fact .l { font-size: 13px; color: var(--ink-2); }
+.fact .r { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.fact .r small { font-size: 12.5px; font-weight: 500; color: var(--ink-3); margin-left: 5px; }
 .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px 12px; margin-bottom: 13px; }
 .head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; margin-bottom: 10px; }
 h2 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: -0.006em; }
@@ -238,6 +421,7 @@ h2 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: -0.006em; }
 svg { display: block; width: 100%; height: auto; }
 .tick { font-size: 11px; fill: var(--ink-3); }
 .peak { font-size: 11.5px; font-weight: 600; fill: var(--ink-2); }
+.tick.day { font-size: 11.5px; fill: var(--ink-2); }
 .grid { stroke: var(--grid-c); stroke-width: 1; }
 
 table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
@@ -306,6 +490,61 @@ def render_dashboard() -> str:
         for i in range(len(s["actual"]) - 1, -1, -1))
 
     worst = max(d["by_hour"], key=lambda r: r["mae"])
+    ol, tm = d["outlook"], d["tomorrow"]
+
+    outlook_card = ""
+    if ol:
+        outlook_card = f"""
+<div class="card">
+  <div class="head">
+    <h2>What the service expects next</h2>
+    <span class="sub">{ol["from"]} to {ol["to"]} · forecast made {ol["made_at"]}</span>
+    <span class="legend">
+      <span><i class="sw" style="background:var(--predicted)"></i>Predicted</span>
+    </span>
+  </div>
+  {forecast_chart(ol)}
+</div>"""
+
+    tomorrow_row = ""
+    if tm:
+        hours = "".join(
+            f'<tr><td>{r["hour"]:02d}:00</td><td class="num">{r["mw"]:,.0f}</td></tr>'
+            for r in tm["rows"])
+        partial = "" if tm["complete"] else (
+            f'<div class="fact"><span class="l">Hours covered</span>'
+            f'<span class="r">{len(tm["rows"])}<small>of 24</small></span></div>')
+        tomorrow_row = f"""
+<div class="row">
+  <div class="card">
+    <div class="head">
+      <h2>Tomorrow, hour by hour</h2>
+      <span class="sub">{tm["date"]}, Brisbane time</span>
+    </div>
+    {tomorrow_chart(tm)}
+  </div>
+
+  <div class="card">
+    <div class="head"><h2>Tomorrow at a glance</h2></div>
+    <div class="facts">
+      <div class="fact"><span class="l">Highest hour</span>
+        <span class="r">{tm["peak"]["mw"]:,.0f}<small>MW at {tm["peak"]["hour"]:02d}:00</small></span></div>
+      <div class="fact"><span class="l">Lowest hour</span>
+        <span class="r">{tm["trough"]["mw"]:,.0f}<small>MW at {tm["trough"]["hour"]:02d}:00</small></span></div>
+      <div class="fact"><span class="l">Daily mean</span>
+        <span class="r">{tm["mean"]:,.0f}<small>MW</small></span></div>
+      <div class="fact"><span class="l">Peak-to-trough swing</span>
+        <span class="r">{tm["peak"]["mw"] - tm["trough"]["mw"]:,.0f}<small>MW</small></span></div>
+      {partial}
+    </div>
+    <details>
+      <summary>All {len(tm["rows"])} hours</summary>
+      <div class="scroll"><table>
+        <thead><tr><th>Hour</th><th class="num">Forecast MW</th></tr></thead>
+        <tbody>{hours}</tbody></table></div>
+    </details>
+  </div>
+</div>"""
 
     body = f"""
 <div class="bar">
@@ -336,7 +575,8 @@ def render_dashboard() -> str:
     <div class="c">{"Under" if o["bias"] < 0 else "Over"}-predicts slightly</div>
   </div>
 </div>
-
+{outlook_card}
+{tomorrow_row}
 <div class="card">
   <div class="head">
     <h2>Predicted against actual</h2>
@@ -361,8 +601,12 @@ def render_dashboard() -> str:
     <div class="head">
       <h2>Error by hour of day</h2>
       <span class="sub">Worst at {worst["hour"]:02d}:00 — rooftop solar makes midday volatile</span>
+      <span class="legend">
+        <span><i class="sw" style="background:var(--actual)"></i>1 day ahead</span>
+        <span><i class="sw" style="background:var(--predicted)"></i>{d["combo"]["far_day"]} days ahead</span>
+      </span>
     </div>
-    {bar_chart(d["by_hour"])}
+    {combo_chart(d["combo"])}
   </div>
 
   <div class="card">
