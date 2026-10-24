@@ -23,13 +23,13 @@ period, 12 April – 23 October 2026 (4,648 hours).
 | Model | MAE | RMSE | MAPE |
 |---|---|---|---|
 | Seasonal naive baseline | 303 MW | 472 MW | 5.71% |
-| Linear regression | 223 MW | — | 4.11% |
-| Random forest | 152 MW | — | 2.85% |
+| Linear regression | 223 MW | - | 4.11% |
+| Random forest | 152 MW | - | 2.85% |
 | **Gradient boosting (deployed)** | **140 MW** | **207 MW** | **2.63%** |
 
 **A 54% reduction in error against the baseline.**
 
-The baseline — demand equals the same hour one week earlier — was built first
+The baseline - demand equals the same hour one week earlier - was built first
 deliberately. Electricity demand is highly repetitive, so a naive method already gets
 within 6%. Without that number, an accuracy figure means nothing.
 
@@ -72,7 +72,7 @@ single step.
 These two columns together isolate the cause.
 
 The backtest supplies *real* weather at every horizon, so it measures only the model
-recursing on its own predictions — and that barely compounds, holding between 2.3% and
+recursing on its own predictions - and that barely compounds, holding between 2.3% and
 2.7% out to seven days. Production supplies *forecast* weather, and a three-day
 weather forecast is less accurate than a one-day one.
 
@@ -88,22 +88,24 @@ one- to three-day comparison above is current.)*
 
 ### Where the model fails
 
-Mean absolute error by hour of day, Brisbane time:
+Mean absolute error by hour of day, Brisbane time, from logged production predictions:
 
 | Time | Mean error |
 |---|---|
-| 2–5am | ~65 MW |
-| 11am–3pm | ~270 MW |
-| 6–7pm | ~105 MW |
+| 2–5am | 84 MW |
+| 11am–3pm | 404 MW |
+| 6–7pm | 104 MW |
 
-Midday error is roughly four times the overnight error. This was predicted from the
-exploratory analysis before the model was built: rooftop solar makes midday grid
-demand volatile in a way the model cannot fully anticipate.
+Midday error is **4.8 times** the overnight error, peaking at 445 MW at 1pm. This was
+predicted from the exploratory analysis before the model was built: rooftop solar makes
+midday grid demand volatile. It is worse in production than in the backtest (which saw
+~270 MW at midday) because production runs on *forecast* solar radiation rather than
+observed - the same weather-forecast decay that drives the horizon degradation above.
 
 ### Operational record
 
 Between 21 September and 24 October 2026 the service ingested **792 consecutive hours
-with no gaps**, refreshing itself every six hours without intervention — including
+with no gaps**, refreshing itself every six hours without intervention - including
 through a provider security incident and a platform-wide deployment pause.
 
 ## API
@@ -115,7 +117,7 @@ through a provider security incident and a platform-wide deployment pause.
 | `GET /forecast?hours=N` | Recursive forecast for the next N hours (1–168) |
 | `GET /docs` | Interactive API documentation |
 
-`/forecast` returns `hours_returned` alongside `hours_requested` — it stops when
+`/forecast` returns `hours_returned` alongside `hours_requested` - it stops when
 forecast weather runs out rather than silently truncating.
 
 ## Features
@@ -156,7 +158,7 @@ Top feature importances: `demand_lag_24h` (0.76), `demand_lag_168h` (0.06),
     docker run -p 8000:8000 qld-energy
 
 On an empty data volume the container builds its own database from the source APIs
-before starting — about 20 seconds for two years of history. On subsequent starts it
+before starting - about 20 seconds for two years of history. On subsequent starts it
 finds the existing database and skips the build.
 
 `REFRESH_HOURS` controls the background refresh interval (default 6).
@@ -178,7 +180,7 @@ Each retrain also writes a dated archive copy, so a revision that turns out wors
 be compared against and rolled back.
 
 `scikit-learn` is pinned in `requirements-api.txt` to the version that trained the
-saved model — a pickled estimator is not guaranteed to load correctly across versions.
+saved model - a pickled estimator is not guaranteed to load correctly across versions.
 
 Note that MAPE is **not** comparable between retrains, because the time-based test
 window moves forward with the data. Compare MAE, or hold the window fixed.
@@ -206,7 +208,7 @@ daylight saving. All data is converted to UTC on ingest.
 preceding-hour mean; everything else is instantaneous.
 
 **Demand is lowest around 11am, not overnight.** `TOTALDEMAND` measures draw from the
-grid, and rooftop solar supplies homes directly at midday — the duck curve. Price
+grid, and rooftop solar supplies homes directly at midday - the duck curve. Price
 follows the same shape, collapsing to around $13/MWh at 10am against $113 at 5pm, and
 going negative 10% of the time. This is why solar radiation is a required feature
 rather than an optional one, and why demand versus temperature is a U shape rather
@@ -232,7 +234,7 @@ Deliberate and documented, not oversights.
   elapsed between the last two retrains.
 - **The local scheduled job depends on the laptop being on.** Windows Task Scheduler
   catches up after a missed start, but days when the machine is off leave gaps in the
-  local prediction log. The deployed service is unaffected — it refreshes itself.
+  local prediction log. The deployed service is unaffected - it refreshes itself.
 - **The database and model file are committed to Git** so a local `docker build` has
   data immediately. Production no longer depends on this, since the container
   bootstraps onto a persistent volume. Removing them from the image is a

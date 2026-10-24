@@ -2,13 +2,15 @@
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, Response
+from src.api.dashboard import render_dashboard
 import threading
 import time
 from contextlib import asynccontextmanager
 import os
 
 from src.features.build import build_features
-from src.ingest.database import read_all, row_count, read_with_future
+from src.ingest.database import read_all, row_count, read_with_future, read_predictions_vs_actual
 from src.models.train import load_model
 
 from src.models.horizon import recursive_forecast
@@ -44,7 +46,14 @@ def root():
     return {
         "service": "QLD electricity demand forecast",
         "model": "gradient boosting",
-        "endpoints": ["/health", "/predict?timestamp=YYYY-MM-DDTHH:MM"],
+        "endpoints": [
+            "/health",
+            "/predict?timestamp=YYYY-MM-DDTHH:MM",
+            "/forecast?hours=N",
+            "/dashboard",
+            "/export.csv",
+            "/docs",
+        ],
     }
 
 
@@ -123,3 +132,20 @@ def forecast(hours: int = 48):
             for ts, v in local.items()
         ],
     }
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard():
+    return render_dashboard()
+
+
+@app.get("/export.csv")
+def export_csv():
+    import io
+    df = read_predictions_vs_actual()
+    buf = io.StringIO()
+    df.to_csv(buf, index=False)
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="predictions.csv"'},
+    )
