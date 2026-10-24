@@ -3,7 +3,9 @@
 A self-updating service that forecasts electricity demand for Queensland from public
 market and weather data.
 
-**Live:** https://qld-energy-forecast-production.up.railway.app/health
+**Live dashboard:** https://qld-energy-forecast-production.up.railway.app/dashboard
+
+**API:** https://qld-energy-forecast-production.up.railway.app/health
 
 ## Architecture
 
