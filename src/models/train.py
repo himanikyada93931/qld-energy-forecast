@@ -82,14 +82,19 @@ def train_and_save(df: pd.DataFrame) -> dict:
     metrics = evaluate(y_test, model.predict(X_test))
 
     MODEL_DIR.mkdir(exist_ok=True)
-    with open(MODEL_PATH, "wb") as f:
-        pickle.dump({
-            "model": model,
-            "features": features,
-            "metrics": metrics,
-            "trained_at": pd.Timestamp.now(tz="UTC").isoformat(),
-            "train_rows": len(X_train),
-        }, f)
+
+    bundle = {
+        "model": model,
+        "features": features,
+        "metrics": metrics,
+        "trained_at": pd.Timestamp.now(tz="UTC").isoformat(),
+        "train_rows": len(X_train),
+    }
+
+    stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%d")
+    for path in (MODEL_PATH, MODEL_DIR / f"gbm_{stamp}.pkl"):
+        with open(path, "wb") as f:
+            pickle.dump(bundle, f)
 
     return metrics
 
