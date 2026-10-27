@@ -1,11 +1,37 @@
 # Queensland Electricity Demand Forecasting
 
-A self-updating service that forecasts electricity demand for Queensland from public
-market and weather data.
+[![tests](https://github.com/himanikyada93931/qld-energy-forecast/actions/workflows/ci.yml/badge.svg)](https://github.com/himanikyada93931/qld-energy-forecast/actions/workflows/ci.yml)
 
 **Live dashboard:** https://qld-energy-forecast-production.up.railway.app/dashboard
 
 **API:** https://qld-energy-forecast-production.up.railway.app/health
+
+![Dashboard](docs/dashboard.png)
+
+## In plain English
+
+**The problem.** Queensland uses a different amount of electricity every hour of every
+day, and the people running the grid have to know roughly how much is coming before it
+arrives, so enough generation is ready. Guess too low and the grid is short; guess too
+high and expensive plant runs for nothing.
+
+**The data.** Two free public sources. AEMO publishes what Queensland actually used,
+every five minutes. Open-Meteo gives the weather, which matters because how much power
+people use depends mostly on how hot or cold it is and how much sun the rooftop solar
+is getting.
+
+**What it does.** It collects its own data every six hours, predicts demand for the
+next three days, writes every prediction down, and then later compares each one
+against what actually happened. Nobody has to run anything.
+
+**How good it is.** Across 1,929 forecasts it was out by 3.7% on average. The obvious
+simple method — assume this hour will be the same as this hour last week — is out by
+6.6% on exactly the same hours. So this is about **44% better than the obvious
+method**, which is the comparison that matters.
+
+**What it can't do.** It cannot see more than about three days ahead, because that is
+as far as the free weather forecast goes. It also does not know about public holidays,
+so the day after one it gets things noticeably wrong.
 
 ## Architecture
 
@@ -19,96 +45,99 @@ once it arrives.
 
 ### Model comparison
 
-All models trained on data up to 12 April 2026 and scored on the same held-out
-period, 12 April – 23 October 2026 (4,648 hours).
+All models trained on data up to 15 April 2026 and scored on the same held-out period,
+15 April – 26 October 2026 (4,666 hours). The naive benchmark is scored on those same
+4,666 hours, not on a different window.
 
 | Model | MAE | RMSE | MAPE |
 |---|---|---|---|
-| Seasonal naive baseline | 303 MW | 472 MW | 5.71% |
-| Linear regression | 223 MW | - | 4.11% |
-| Random forest | 152 MW | - | 2.85% |
-| **Gradient boosting (deployed)** | **140 MW** | **207 MW** | **2.63%** |
+| Seasonal naive benchmark | 306 MW | 476 MW | 5.76% |
+| Linear regression | 224 MW | - | 4.12% |
+| Random forest | 153 MW | - | 2.88% |
+| **Gradient boosting (deployed)** | **141 MW** | **210 MW** | **2.64%** |
 
-**A 54% reduction in error against the baseline.**
+**A 54% reduction in error against the benchmark.**
 
-The baseline - demand equals the same hour one week earlier - was built first
+The benchmark — demand equals the same hour one week earlier — was built first
 deliberately. Electricity demand is highly repetitive, so a naive method already gets
 within 6%. Without that number, an accuracy figure means nothing.
 
-> **On comparing like with like.** Measured across the full two years the baseline
-> scores 421 MW MAE / 7.23% MAPE, because the April–October window happens to be more
-> predictable than average. Quoting the whole-period baseline against a test-window
-> model would overstate the improvement by about twelve percentage points. Every
-> figure in the table above is from the same window.
+> **On comparing like with like.** Measured across the full two years the benchmark
+> scores about 7.2% MAPE, because the April–October window happens to be more
+> predictable than average. Quoting the whole-period benchmark against a test-window
+> model would overstate the improvement by roughly twelve percentage points. Every
+> figure in the table above comes from the same 4,666 hours.
 
-Linear regression nearly halving the baseline error indicates the features are doing
+Linear regression nearly halving the benchmark error indicates the features are doing
 most of the work, not the algorithm.
+
+**The shipped model is not the scored model.** The split above exists to produce an
+honest number on hours the model has never seen. A model shipped from that split would
+never have seen the most recent quarter of history either, which is the part most like
+tomorrow. So the final model is refitted on all 18,664 rows with identical settings,
+and `/health` reports both windows:
+
+    "model_evaluated_on": { "rows": 4666,  "start": "2026-04-15", "end": "2026-10-26" }
+    "model_trained_on":   { "rows": 18664, "start": "2024-09-08", "end": "2026-10-26" }
 
 ### Production accuracy
 
-1,785 predictions made *before the fact* between 21 September and 23 October 2026,
-scored against what actually happened:
+1,929 forecasts made ahead of time between 8 September and 27 October 2026, scored
+against what actually happened:
 
-| | Value |
-|---|---|
-| MAE | 182 MW |
-| MAPE | **3.58%** |
-| Predictions scored | 1,785 |
-
-This is not a backtest. Each of these was generated by the running service, stored,
-and only later compared against the observed demand.
-
-It is worse than the 2.63% held-out figure, for three reasons, all of them real:
-production uses *forecast* weather rather than actuals, the model was two months stale
-for most of that period, and these span horizons from 1 to 72 hours rather than a
-single step.
-
-### What drives horizon degradation
-
-| Days ahead | Production (forecast weather) | Backtest (actual weather) |
+| | Model | Same-hour-last-week benchmark |
 |---|---|---|
-| 1 | 3.25% | 2.29% |
-| 2 | 3.40% | 2.61% |
-| 3 | 4.10% | 2.54% |
+| MAPE | **3.69%** | 6.55% |
+| MAE | **191 MW** | 337 MW |
+| Hours scored | 1,929 | the same 1,929 |
 
-These two columns together isolate the cause.
+**44% better than the benchmark on live forecasts.** The benchmark is recomputed from
+the observations table for exactly the scored rows every time the dashboard loads, so
+the comparison cannot drift out of date.
 
-The backtest supplies *real* weather at every horizon, so it measures only the model
-recursing on its own predictions - and that barely compounds, holding between 2.3% and
-2.7% out to seven days. Production supplies *forecast* weather, and a three-day
-weather forecast is less accurate than a one-day one.
+This is not a backtest. Each forecast was generated by the running service, stored, and
+only later compared against observed demand.
 
-**So the horizon degradation is the weather forecast decaying, not the model.** A
-better model would barely improve the three-day forecast; better weather input would.
+It is worse than the 2.64% held-out figure for reasons that are all real: production
+uses *forecast* weather rather than observed, and these span horizons from 1 to 72
+hours rather than a single step.
 
-Demand is strongly periodic and weather-driven, and both anchors survive recursion:
-the daily cycle holds predictions in shape, and weather is supplied independently
-rather than predicted.
+### Accuracy by horizon
 
-*(The seven-day backtest figures were measured on the previous model revision. The
-one- to three-day comparison above is current.)*
+| Days ahead | MAPE | Hours scored |
+|---|---|---|
+| 1 | 3.34% | 672 |
+| 2 | 3.57% | 648 |
+| 3 | 4.22% | 609 |
+
+Error grows with horizon, and the cause is the weather input rather than the model
+recursing on its own predictions: a backtest supplied with *observed* weather holds
+between 2.3% and 2.7% out to seven days, while production, supplied with *forecast*
+weather, degrades as above. A better model would barely improve the three-day forecast.
+Better weather input would.
+
+`/forecast` reports these measured figures rather than asserting an accuracy.
 
 ### Where the model fails
 
-Mean absolute error by hour of day, Brisbane time, from logged production predictions:
+Mean absolute error by hour of day, Brisbane time, from logged production forecasts:
 
 | Time | Mean error |
 |---|---|
-| 2–5am | 84 MW |
-| 11am–3pm | 404 MW |
-| 6–7pm | 104 MW |
+| 2–5am | 82 MW |
+| 11am–3pm | 413 MW |
+| 6–7pm | 117 MW |
 
-Midday error is **4.8 times** the overnight error, peaking at 445 MW at 1pm. This was
+Midday error is **5.1 times** the overnight error, peaking at 457 MW at noon. This was
 predicted from the exploratory analysis before the model was built: rooftop solar makes
-midday grid demand volatile. It is worse in production than in the backtest (which saw
-~270 MW at midday) because production runs on *forecast* solar radiation rather than
-observed - the same weather-forecast decay that drives the horizon degradation above.
+midday grid demand volatile, and production runs on *forecast* solar radiation rather
+than observed.
 
 ### Operational record
 
-Between 21 September and 24 October 2026 the service ingested **792 consecutive hours
-with no gaps**, refreshing itself every six hours without intervention - including
-through a provider security incident and a platform-wide deployment pause.
+**18,855 hourly observations from 1 September 2024 to 26 October 2026 with zero missing
+hours.** The deployed service refreshes itself every six hours without intervention,
+including through a provider security incident and a platform-wide deployment pause.
 
 ## API
 
@@ -116,10 +145,12 @@ through a provider security incident and a platform-wide deployment pause.
 |---|---|
 | `GET /health` | Status, row count, data freshness, and which model is live |
 | `GET /predict?timestamp=YYYY-MM-DDTHH:MM` | Demand in MW for an hour with known history |
-| `GET /forecast?hours=N` | Recursive forecast for the next N hours (1–168) |
+| `GET /forecast?hours=N` | Recursive forecast for the next N hours (1–168), with measured accuracy |
+| `GET /dashboard` | Accuracy of logged forecasts, scored against reality |
+| `GET /export.csv` | Every logged forecast and its outcome |
 | `GET /docs` | Interactive API documentation |
 
-`/forecast` returns `hours_returned` alongside `hours_requested` - it stops when
+`/forecast` returns `hours_returned` alongside `hours_requested` — it stops when
 forecast weather runs out rather than silently truncating.
 
 ## Features
@@ -146,24 +177,56 @@ current value.
 Top feature importances: `demand_lag_24h` (0.76), `demand_lag_168h` (0.06),
 `shortwave_radiation` (0.04).
 
+## How forecasts are logged
+
+Every forecast is stored with two separate timestamps, because they are not the same
+thing:
+
+- `made_at_utc` — the last observed hour the forecast was built from.
+- `issued_at_utc` — the wall-clock time the row was written.
+
+`lead_hours` is measured from the issue time, so a forecast can only claim to precede
+its outcome if it genuinely did. Rows are appended, never replaced, so a refresh cannot
+overwrite what was believed earlier. Rows written before this scheme was introduced
+carry a NULL issue time rather than a guessed one, and the dashboard counts them
+separately.
+
+## Tests
+
+    pytest -q
+
+25 tests, run on every push by GitHub Actions against Python 3.12, the same version the
+container uses. They pin the rules that fail silently rather than loudly: that each lag
+reaches back exactly as far as it claims, that rolling means exclude the present, that
+`Etc/GMT-10` is read as UTC+10, that a refresh appends rather than overwrites, and that
+the API never advertises an accuracy it has not measured.
+
 ## Running locally
 
     python -m venv .venv
-    .venv\Scripts\Activate.ps1
+
+    .venv\Scripts\Activate.ps1          # Windows
+    source .venv/bin/activate           # macOS and Linux
+
     pip install -e .
     pip install -r requirements.txt
     uvicorn src.api.main:app --reload
+
+`requirements-api.txt` is the runtime list the container installs.
+`requirements.txt` includes it and adds the notebook and test tooling, so neither
+reaches the image.
 
 ## Running in Docker
 
     docker build -t qld-energy .
     docker run -p 8000:8000 qld-energy
 
-On an empty data volume the container builds its own database from the source APIs
-before starting - about 20 seconds for two years of history. On subsequent starts it
-finds the existing database and skips the build.
+No database is copied into the image. On an empty volume the container builds its own
+from the source APIs before starting — about 20 seconds for two years of history. On
+subsequent starts it finds the existing database and skips the build.
 
 `REFRESH_HOURS` controls the background refresh interval (default 6).
+`REFRESH_ENABLED=0` disables the background thread, which is what the tests do.
 
 ## Updating the data
 
@@ -176,13 +239,13 @@ source is unavailable, and exits non-zero so a scheduler can detect failure.
 
     python -c "from src.ingest.database import read_all; from src.features.build import build_features; from src.models.train import train_and_save; print(train_and_save(build_features(read_all())))"
 
-Saves the model with its feature list, metrics and training timestamp, so `/health`
-reports what is actually deployed rather than relying on this file being current.
-Each retrain also writes a dated archive copy, so a revision that turns out worse can
-be compared against and rolled back.
+Scores on the held-out window, then refits on every row before saving. Prints both
+windows so it is obvious what was measured and what was shipped. Each retrain also
+writes a dated archive copy locally, so a revision that turns out worse can be compared
+against and rolled back; archives are not committed.
 
-`scikit-learn` is pinned in `requirements-api.txt` to the version that trained the
-saved model - a pickled estimator is not guaranteed to load correctly across versions.
+`scikit-learn` is pinned in `requirements-api.txt` to the version that trained the saved
+model — a pickled estimator is not guaranteed to load correctly across versions.
 
 Note that MAPE is **not** comparable between retrains, because the time-based test
 window moves forward with the data. Compare MAE, or hold the window fixed.
@@ -192,61 +255,66 @@ window moves forward with the data. Compare MAE, or hold the window fixed.
     src/ingest/     fetchers, transforms, database
     src/features/   feature engineering
     src/models/     baseline, training, recursive forecasting
-    src/api/        FastAPI service
+    src/api/        FastAPI service and dashboard
     scripts/        startup bootstrap and daily update
+    tests/          25 tests, run in CI
     notebooks/      exploratory analysis and data notes
-    docs/           architecture diagram
-    tests/          automated checks
-    data/raw/       unmodified API responses (not in git)
+    docs/           architecture diagram and screenshots
+    data/           database and raw API responses (not in git)
 
 ## Data notes
 
 Findings from the inspection notebook that shaped the design:
 
-**Timestamps mark the end of each interval.** AEMO publishes in UTC+10 with no
-daylight saving. All data is converted to UTC on ingest.
+**Timestamps mark the end of each interval.** AEMO publishes in UTC+10 with no daylight
+saving. All data is converted to UTC on ingest.
 
 **Open-Meteo mixes conventions in a single response.** `shortwave_radiation` is a
 preceding-hour mean; everything else is instantaneous.
 
 **Demand is lowest around 11am, not overnight.** `TOTALDEMAND` measures draw from the
-grid, and rooftop solar supplies homes directly at midday - the duck curve. Price
+grid, and rooftop solar supplies homes directly at midday — the duck curve. Price
 follows the same shape, collapsing to around $13/MWh at 10am against $113 at 5pm, and
-going negative 10% of the time. This is why solar radiation is a required feature
-rather than an optional one, and why demand versus temperature is a U shape rather
-than a line.
+going negative 10% of the time. This is why solar radiation is a required feature rather
+than an optional one, and why demand versus temperature is a U shape rather than a line.
 
-**Cloud cover is a poor proxy for sunlight.** One sample day showed 77% cloud with
-near clear-sky radiation, because total cloud includes high cirrus that blocks little
-light. `shortwave_radiation` measures what actually reaches the ground.
+**Cloud cover is a poor proxy for sunlight.** One sample day showed 77% cloud with near
+clear-sky radiation, because total cloud includes high cirrus that blocks little light.
+`shortwave_radiation` measures what actually reaches the ground.
 
-**Two weather sources are needed.** The ERA5 archive is accurate but published about
-five days late, and describes only the past. The forecast endpoint covers the recent
-gap and the next three days. They overlap by two days, so there is no seam; where
-both cover an hour, the archive wins.
+**Two weather sources are needed.** The ERA5 archive is accurate but published about five
+days late, and describes only the past. The forecast endpoint covers the recent gap and
+the next three days. They overlap by two days, so there is no seam; where both cover an
+hour, the archive wins.
 
 ## Known limitations
 
 Deliberate and documented, not oversights.
 
+- **Public holidays are not modelled.** The day after King's Birthday (6 October 2026)
+  was the worst day in the log at 7.3% error, because the 24-hour lag copied the
+  holiday's low demand. Holiday flags are the next planned change.
+- **No comparison against AEMO's own forecasts.** AEMO publishes pre-dispatch demand
+  forecasts; this project does not yet measure itself against them.
+- **One weather location.** Brisbane only, for a state that includes Townsville, Cairns
+  and Gladstone industry.
 - **Forecast horizon is capped by weather availability**, at roughly three days, and
-  accuracy within that range is limited by weather forecast quality rather than by
-  the model.
-- **Retraining is manual.** The data refreshes itself; the model does not. Two months
-  elapsed between the last two retrains.
-- **The local scheduled job depends on the laptop being on.** Windows Task Scheduler
-  catches up after a missed start, but days when the machine is off leave gaps in the
-  local prediction log. The deployed service is unaffected - it refreshes itself.
-- **The database and model file are committed to Git** so a local `docker build` has
-  data immediately. Production no longer depends on this, since the container
-  bootstraps onto a persistent volume. Removing them from the image is a
-  straightforward next step.
-- **Python version mismatch.** Development runs 3.14, the container 3.12, because
-  3.14 slim images are not yet reliable for all dependencies.
-- **No automated tests yet.**
+  accuracy within that range is limited by weather forecast quality rather than by the
+  model.
+- **Retraining is manual.** The data refreshes itself; the model does not.
+- **One split, hand-set hyperparameters, point forecasts only.** No rolling-origin
+  cross-validation and no prediction intervals.
+- **The local scheduled job depends on the laptop being on.** The deployed service is
+  unaffected — it refreshes itself.
+- **Python version mismatch locally.** Development runs 3.14; the container and CI both
+  run 3.12, so the tested version is the shipped version.
 
 ## Data sources
 
 - AEMO aggregated price and demand data
 - Weather data by [Open-Meteo.com](https://open-meteo.com), CC BY 4.0
   (Zippenfenig, P. 2023, DOI 10.5281/ZENODO.7970649)
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).
