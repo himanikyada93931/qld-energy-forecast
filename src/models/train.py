@@ -8,7 +8,6 @@ from sklearn.linear_model import LinearRegression
 
 from src.config import PROJECT_ROOT
 
-
 TARGET = "demand_mw"
 EXCLUDE = ["demand_mw", "price_aud_mwh"]
 

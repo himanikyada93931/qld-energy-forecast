@@ -3,7 +3,6 @@
 import numpy as np
 import pandas as pd
 
-from src.features.build import build_features
 from src.models.train import load_model
 
 LAG_HOURS = 168  # longest lookback any feature needs
@@ -42,7 +41,7 @@ def recursive_forecast(history: pd.DataFrame, steps: int, model, features) -> pd
 
 def build_features_keep_last(df: pd.DataFrame):
     """Build features and return only the final row, or None if incomplete."""
-    from src.features.build import add_time_features, add_weather_features, add_lag_features
+    from src.features.build import add_lag_features, add_time_features, add_weather_features
 
     out = add_time_features(df.copy())
     out = add_weather_features(out)

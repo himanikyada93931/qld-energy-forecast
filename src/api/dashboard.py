@@ -8,7 +8,7 @@ import math
 
 import pandas as pd
 
-from src.ingest.database import read_predictions_vs_actual, read_all
+from src.ingest.database import read_all, read_predictions_vs_actual
 from src.models.train import load_model
 
 CHART_DAYS = 7
