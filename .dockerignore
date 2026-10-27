@@ -10,3 +10,8 @@ logs/
 data/raw/
 .ipynb_checkpoints/
 *.egg-info/
+tests/
+.github/
+ruff.toml
+docs/
+README.md

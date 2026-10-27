@@ -6,9 +6,11 @@ COPY requirements-api.txt pyproject.toml ./
 RUN pip install --no-cache-dir -r requirements-api.txt
 
 COPY src/ ./src/
-COPY data/energy.db ./data/energy.db
 COPY models/ ./models/
 COPY scripts/ ./scripts/
+
+# No database is copied in. startup.py builds one on an empty volume and
+# skips the build when the volume already holds a complete database.
 
 RUN pip install --no-cache-dir -e .
 

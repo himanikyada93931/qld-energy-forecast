@@ -1,39 +1,89 @@
 """Prediction API for Queensland electricity demand."""
 
-import pandas as pd
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, Response
-from src.api.dashboard import render_dashboard
+import os
 import threading
 import time
 from contextlib import asynccontextmanager
-import os
 
+import pandas as pd
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, Response
+
+from src.api.dashboard import render_dashboard
 from src.features.build import build_features
-from src.ingest.database import read_all, row_count, read_with_future, read_predictions_vs_actual
+from src.ingest.database import read_all, read_predictions_vs_actual, read_with_future, row_count
+from src.models.horizon import recursive_forecast
 from src.models.train import load_model
 
-from src.models.horizon import recursive_forecast
+
+def measured_accuracy() -> dict:
+    """Error by forecast horizon, read from the prediction log.
+
+    The endpoint used to advertise a fixed "2.3-2.7%", copied from a backtest
+    on observed weather. Live forecasts use forecast weather and do worse. A
+    service that states an accuracy it does not achieve is worse than one that
+    states none, so this reads the scored rows and reports what actually
+    happened.
+    """
+    scored = read_predictions_vs_actual().dropna(subset=["actual_mw"])
+    if scored.empty:
+        return {"status": "no scored forecasts yet"}
+
+    day = ((scored["hours_ahead"] - 1) // 24) + 1
+    pct = (scored["error_mw"].abs() / scored["actual_mw"]) * 100
+
+    return {
+        "source": "measured on logged forecasts scored against observed demand",
+        "forecasts_scored": int(len(scored)),
+        "mape_overall": round(float(pct.mean()), 2),
+        "mape_by_day_ahead": {
+            f"day_{int(d)}": round(float(pct[day == d].mean()), 2)
+            for d in sorted(day.unique())
+        },
+    }
 
 
 
 REFRESH_HOURS = float(os.getenv("REFRESH_HOURS", "6"))
+STARTUP_DELAY_SECONDS = float(os.getenv("STARTUP_DELAY_SECONDS", "30"))
+REFRESH_ENABLED = os.getenv("REFRESH_ENABLED", "1") != "0"
+
+
+def data_age_hours() -> float:
+    """How old the newest observation is. Large if the database is unreadable."""
+    try:
+        return (pd.Timestamp.now(tz="UTC") - read_all().index.max()).total_seconds() / 3600
+    except Exception:
+        return float("inf")
+
 
 def refresh_loop():
-    """Update data and log predictions every few hours, in the background."""
+    """Keep the data current in the background.
+
+    The old version slept for six hours before its first update, so a container
+    that restarted served stale data for a quarter of a day. It now refreshes
+    shortly after start-up, unless the database is already fresher than the
+    refresh interval, which is the case right after the bootstrap.
+    """
     from scripts.daily_update import main as update
 
-    while True:
+    time.sleep(STARTUP_DELAY_SECONDS)          # let uvicorn bind its port first
+
+    if data_age_hours() < REFRESH_HOURS:
         time.sleep(REFRESH_HOURS * 3600)
+
+    while True:
         try:
             update()
         except Exception as exc:
             print(f"Background refresh failed: {exc}")
+        time.sleep(REFRESH_HOURS * 3600)
 
 
 @asynccontextmanager
 async def lifespan(app):
-    threading.Thread(target=refresh_loop, daemon=True).start()
+    if REFRESH_ENABLED:
+        threading.Thread(target=refresh_loop, daemon=True).start()
     yield
 
 
@@ -72,6 +122,8 @@ def health():
             "data_age_hours": round(age_hours, 1),
             "model_trained_at": BUNDLE["trained_at"],
             "model_mape": round(BUNDLE["metrics"]["MAPE"], 2),
+            "model_trained_on": BUNDLE.get("trained_on", "not recorded"),
+            "model_evaluated_on": BUNDLE.get("evaluated_on", "not recorded"),
         }
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Database unavailable: {exc}")
@@ -107,8 +159,9 @@ def predict_demand(timestamp: str):
 def forecast(hours: int = 48):
     """Forecast demand for the next N hours beyond the last observation.
 
-    Predictions feed into their own lag features, so accuracy holds at roughly
-    2.3-2.7% MAPE out to seven days. The real limit is weather availability.
+    Predictions feed into their own lag features. Accuracy is not asserted
+    here: `accuracy` reports what the logged forecasts actually scored. The
+    hard limit on horizon is how far ahead weather is available.
     """
     if not 1 <= hours <= 168:
         raise HTTPException(status_code=400, detail="hours must be between 1 and 168")
@@ -126,7 +179,7 @@ def forecast(hours: int = 48):
         "hours_requested": hours,
         "hours_returned": len(series),
         "model": "gradient_boosting_recursive",
-        "expected_mape": "2.3-2.7%",
+        "accuracy": measured_accuracy(),
         "forecast": [
             {"time_brisbane": ts.isoformat(), "demand_mw": round(v, 1)}
             for ts, v in local.items()

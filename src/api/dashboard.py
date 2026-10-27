@@ -8,15 +8,46 @@ import math
 
 import pandas as pd
 
-from src.ingest.database import read_predictions_vs_actual
+from src.ingest.database import read_predictions_vs_actual, read_all
 from src.models.train import load_model
 
 CHART_DAYS = 7
 TZ = "Australia/Brisbane"
 
-# Naive baseline, scored on the same held-out window as the model.
-BASELINE_MAPE = 5.71
-BASELINE_MAE = 303
+# The benchmark anyone can beat you with: demand equals the same hour a week ago.
+NAIVE_LAG_HOURS = 168
+
+
+def naive_baseline(scored: pd.DataFrame) -> dict | None:
+    """Score the naive benchmark on exactly the hours the model was scored on.
+
+    Quoting a baseline measured over a different period is the mistake this
+    project's own README warns about. So the benchmark is computed here, from
+    the observations table, for the same rows and nothing else. Hours with no
+    observation a week earlier are dropped from both sides, so the comparison
+    stays like for like.
+    """
+    history = read_all()["demand_mw"]
+    reference = scored["target_utc"] - pd.Timedelta(hours=NAIVE_LAG_HOURS)
+
+    matched = scored.assign(naive=reference.map(history)).dropna(subset=["naive"])
+    if matched.empty:
+        return None
+
+    naive_err = (matched["naive"] - matched["actual_mw"]).abs()
+    model_err = matched["abs_err"]
+
+    naive_mape = float((naive_err / matched["actual_mw"]).mean() * 100)
+    model_mape = float((model_err / matched["actual_mw"]).mean() * 100)
+
+    return {
+        "n": int(len(matched)),
+        "naive_mae": float(naive_err.mean()),
+        "naive_mape": naive_mape,
+        "model_mae": float(model_err.mean()),
+        "model_mape": model_mape,
+        "skill": (1 - model_mape / naive_mape) * 100 if naive_mape else 0.0,
+    }
 
 
 # ---------------------------------------------------------------- data
@@ -59,6 +90,14 @@ def build_dashboard_data() -> dict:
          "mae": g["abs_err"].mean(), "n": int(len(g))}
         for d, g in scored.groupby("day")
     ]
+
+    baseline = naive_baseline(scored)
+
+    # How many rows can prove they were issued before the hour they describe?
+    if "lead_hours" in scored.columns:
+        provable = int((scored["lead_hours"] > 0).sum())
+    else:
+        provable = 0
 
     hourly = scored.groupby(scored["brisbane"].dt.hour)["abs_err"].mean()
     by_hour = [{"hour": int(h), "mae": float(v)} for h, v in hourly.items()]
@@ -140,7 +179,8 @@ def build_dashboard_data() -> dict:
 
     return {"empty": False, "overall": overall, "by_horizon": by_horizon,
             "by_hour": by_hour, "combo": combo, "series": series,
-            "outlook": outlook, "tomorrow": tomorrow, "model": model}
+            "outlook": outlook, "tomorrow": tomorrow, "model": model,
+            "baseline": baseline, "provable": provable}
 
 
 # ---------------------------------------------------------------- charts
@@ -490,6 +530,17 @@ def render_dashboard() -> str:
         for i in range(len(s["actual"]) - 1, -1, -1))
 
     worst = max(d["by_hour"], key=lambda r: r["mae"])
+
+    b = d["baseline"]
+    if b:
+        base_mape = (f'vs {b["naive_mape"]:.2f}% same-hour-last-week '
+                     f'&mdash; {b["skill"]:.0f}% better')
+        base_mae = f'vs {b["naive_mae"]:,.0f} MW same-hour-last-week'
+        like_for_like = (f'Benchmark measured on the same {b["n"]:,} hours, '
+                         f'not a different window.')
+    else:
+        base_mape = base_mae = "no benchmark available yet"
+        like_for_like = ""
     ol, tm = d["outlook"], d["tomorrow"]
 
     outlook_card = ""
@@ -549,7 +600,7 @@ def render_dashboard() -> str:
     body = f"""
 <div class="bar">
   <h1>Forecast accuracy</h1>
-  <span class="live">Scored after the fact · {o["first"]} to {o["last"]}</span>
+  <span class="live">Scored after the fact · {o["first"]} to {o["last"]} · {like_for_like}</span>
   {prov}
 </div>
 
@@ -557,12 +608,12 @@ def render_dashboard() -> str:
   <div class="tile">
     <div class="v">{o["mape"]:.2f}%</div>
     <div class="k">Mean absolute % error</div>
-    <div class="c">Naive baseline {BASELINE_MAPE}%</div>
+    <div class="c">{base_mape}</div>
   </div>
   <div class="tile">
     <div class="v">{o["mae"]:,.0f}<span class="u"> MW</span></div>
     <div class="k">Mean absolute error</div>
-    <div class="c">Naive baseline {BASELINE_MAE} MW</div>
+    <div class="c">{base_mae}</div>
   </div>
   <div class="tile">
     <div class="v">{o["n"]:,}</div>

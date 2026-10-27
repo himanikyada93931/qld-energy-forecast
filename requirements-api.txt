@@ -1,6 +1,8 @@
+# Runtime only: what the container installs and what the service needs to run.
+# Keep this list short. Anything added here ships to production.
 pandas
 numpy
-scikit-learn==1.9.0
+scikit-learn==1.9.0        # pinned: a pickled model is not portable across versions
 requests
 python-dotenv
 fastapi
