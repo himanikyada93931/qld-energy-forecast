@@ -3,16 +3,20 @@
 import logging
 import sys
 from datetime import date, timedelta
-import pandas as pd
-
-from src.models.train import load_model
-from src.models.horizon import recursive_forecast
 
 from src.config import LOGS
 from src.ingest.aemo import fetch_month
-from src.ingest.weather import fetch_weather, fetch_forecast
+from src.ingest.database import (
+    log_predictions,
+    read_with_future,
+    row_count,
+    upsert,
+    upsert_future_weather,
+)
 from src.ingest.transform import build_dataset, build_dataset_with_future
-from src.ingest.database import (upsert, row_count, upsert_future_weather,log_predictions, read_with_future)
+from src.ingest.weather import fetch_forecast, fetch_weather
+from src.models.horizon import recursive_forecast
+from src.models.train import load_model
 
 logging.basicConfig(
     level=logging.INFO,

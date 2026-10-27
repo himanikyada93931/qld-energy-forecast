@@ -63,7 +63,7 @@ def fetch_weather(start_date: str, end_date: str,
         except requests.exceptions.RequestException:
             time.sleep(2 ** attempt)
 
-    raise RuntimeError(f"Failed to fetch weather after 3 attempts")
+    raise RuntimeError("Failed to fetch weather after 3 attempts")
 
 
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"

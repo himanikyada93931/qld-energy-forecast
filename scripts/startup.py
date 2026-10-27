@@ -2,11 +2,10 @@
 
 import logging
 import sys
+from datetime import date, timedelta
 
 from src.config import DB_PATH
 from src.ingest.database import row_count
-
-from datetime import date, timedelta
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
 log = logging.getLogger(__name__)
@@ -24,7 +23,6 @@ def main():
 
     from scripts.daily_update import main as update
     from src.ingest.aemo import fetch_range
-    from datetime import date
 
     today = date.today()
     start_year = today.year - 2
