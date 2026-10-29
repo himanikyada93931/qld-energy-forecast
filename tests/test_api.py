@@ -51,3 +51,23 @@ def test_dashboard_carries_no_javascript():
     """Charts are server-rendered SVG; a script tag means something regressed."""
     html = client.get("/dashboard").text
     assert "<script" not in html
+
+
+def test_export_csv_keeps_the_columns_the_power_bi_report_reads():
+    """The export is a contract, not an internal detail.
+
+    A Power BI query pins the columns it expects when it is first written.
+    Adding two columns to this endpoint once pushed actual_mw and error_mw
+    past the end of that pin, and the report silently served stale data for
+    days instead of failing. Any change to these names has to be deliberate.
+    """
+    response = client.get("/export.csv")
+    assert response.status_code == 200
+
+    header = response.text.splitlines()[0].split(",")
+
+    required = {"target_utc", "made_at_utc", "issued_at_utc", "hours_ahead",
+                "lead_hours", "predicted_mw", "model_version", "actual_mw", "error_mw"}
+    missing = required - set(header)
+
+    assert not missing, f"export.csv no longer provides: {sorted(missing)}"
