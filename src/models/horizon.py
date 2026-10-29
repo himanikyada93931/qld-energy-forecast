@@ -12,7 +12,7 @@ def recursive_forecast(history: pd.DataFrame, steps: int, model, features) -> pd
     """Predict `steps` hours ahead, feeding each prediction back in as history.
 
     `history` must contain demand and weather covering the forecast window.
-    Demand beyond the origin is ignored — that is the point.
+    Demand beyond the origin is ignored - that is the point.
     """
     work = history.copy()
     origin = work["demand_mw"].last_valid_index()
@@ -41,20 +41,16 @@ def recursive_forecast(history: pd.DataFrame, steps: int, model, features) -> pd
 
 def build_features_keep_last(df: pd.DataFrame):
     """Build features and return only the final row, or None if incomplete."""
-    from src.features.build import add_lag_features, add_time_features, add_weather_features
+    from src.features.build import apply_feature_steps
 
-    out = add_time_features(df.copy())
-    out = add_weather_features(out)
-    out = add_lag_features(out)
-
-    last = out.iloc[[-1]]
+    last = apply_feature_steps(df.copy()).iloc[[-1]]
     return None if last.drop(columns=["demand_mw", "price_aud_mwh"]).isna().any().any() else last
 
 def horizon_error(df: pd.DataFrame, max_hours: int = 96, n_origins: int = 30) -> pd.DataFrame:
     """Backtest recursive forecasts from many past origins.
 
     At each origin, demand after that point is hidden, so the forecast must
-    feed on its own predictions — the same as real use.
+    feed on its own predictions - the same as real use.
     """
     bundle = load_model()
     model, features = bundle["model"], bundle["features"]

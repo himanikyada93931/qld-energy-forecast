@@ -4,11 +4,19 @@ A leak does not raise an error. It produces a better score and a model that
 fails in production, so every rule the builder relies on is asserted here.
 """
 
+from datetime import date
+
 import numpy as np
 import pandas as pd
 import pytest
 
-from src.features.build import add_lag_features, build_features, build_forecast_features
+from src.features.build import (
+    QLD_HOLIDAYS,
+    add_lag_features,
+    build_features,
+    build_forecast_features,
+    is_statewide_holiday,
+)
 
 
 @pytest.fixture
@@ -93,3 +101,86 @@ def test_forecast_features_start_after_the_last_observation(hourly):
 
     assert future.index.min() == last_known + pd.Timedelta(hours=1)
     assert len(future) == 24
+
+
+# ---------------------------------------------------------------- holidays
+
+
+def test_public_holiday_is_flagged_and_an_ordinary_day_is_not(hourly):
+    """26 January 2026 is Australia Day in Queensland. 27 January is not."""
+    out = build_features(hourly.copy())
+    local = out.index.tz_convert("Australia/Brisbane")
+
+    holiday = out[local.date == date(2026, 1, 26)]
+    ordinary = out[local.date == date(2026, 1, 27)]
+
+    assert len(holiday) == 24 and len(ordinary) == 24
+    assert (holiday["is_holiday"] == 1).all()
+    assert (ordinary["is_holiday"] == 0).all()
+
+
+def test_day_after_a_holiday_is_flagged(hourly):
+    """The 24-hour lag copies a holiday into the next day, so the model is told."""
+    out = build_features(hourly.copy())
+    local = out.index.tz_convert("Australia/Brisbane")
+
+    after = out[local.date == date(2026, 1, 27)]
+    normal = out[local.date == date(2026, 1, 28)]
+
+    assert (after["is_day_after_holiday"] == 1).all()
+    assert (normal["is_day_after_holiday"] == 0).all()
+
+
+def test_holiday_flag_uses_brisbane_dates_not_utc(hourly):
+    """Midnight Brisbane on Australia Day is 2pm UTC the day before.
+
+    Queensland is UTC+10, so the holiday has to be decided on the local date.
+    Reading the UTC date instead would mark the wrong ten hours.
+    """
+    out = build_features(hourly.copy())
+
+    first_local_hour = pd.Timestamp("2026-01-25 14:00", tz="UTC")   # = 26th, 00:00 Brisbane
+    last_utc_hour = pd.Timestamp("2026-01-26 23:00", tz="UTC")      # = 27th, 09:00 Brisbane
+
+    assert out.loc[first_local_hour, "is_holiday"] == 1
+    assert out.loc[last_utc_hour, "is_holiday"] == 0
+    assert out.loc[last_utc_hour, "is_day_after_holiday"] == 1
+
+
+def test_forecast_features_match_training_features_exactly(hourly):
+    """One pipeline, one column list.
+
+    The live forecast used to rebuild features through its own copy of the
+    pipeline. If the two ever drift apart the model is fed columns it was not
+    trained on, so this asserts they cannot.
+    """
+    trained = build_features(hourly.copy())
+    future = build_forecast_features(hourly.copy(), hours_ahead=24)
+
+    assert list(future.columns) == list(trained.columns)
+
+    # Calendar and lag columns are computable for future hours; weather is not -
+    # that arrives separately from the forecast API.
+    calendar_and_lags = [c for c in future.columns
+                         if c.startswith(("hour", "dow", "demand_lag", "demand_roll", "is_"))]
+    assert not future[calendar_and_lags].isna().any().any()
+
+
+def test_holiday_flags_are_known_for_future_hours(hourly):
+    """Holiday dates are published years ahead, so forecast rows must carry them."""
+    future = build_forecast_features(hourly.copy(), hours_ahead=24)
+
+    assert {"is_holiday", "is_day_after_holiday"} <= set(future.columns)
+    assert future["is_holiday"].isin([0, 1]).all()
+
+
+def test_ekka_is_not_treated_as_a_holiday():
+    """The Royal Queensland Show is a Brisbane-only holiday.
+
+    The rest of the state works, so state-wide demand does not drop like it
+    does on a real holiday. Flagging it made those days measurably worse, so
+    this pins the decision to exclude it.
+    """
+    assert date(2026, 8, 12) in QLD_HOLIDAYS          # the package does list it
+    assert not is_statewide_holiday(date(2026, 8, 12))  # we deliberately do not
+    assert is_statewide_holiday(date(2026, 10, 5))      # King's Birthday: everyone
